@@ -1,0 +1,533 @@
+#include <Keypad.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <WebServer.h>
+#include <time.h>
+
+// ==================== إعدادات ====================
+#define LED_PIN 2  // اللمبة الزرقاء المدمجة في اللوحة
+
+const char* ssid        = "WIFI_name";
+const char* password    = "WIFI_password";
+const char* ADMIN_PASS  = "web-admin-password";
+
+// 1. رابط الـ Webhook بتاع N8N (لـ CRM)
+const char* webhook_url = "n8n_webhook_url";
+
+// 2. إعدادات Supabase 
+const String SUPABASE_PROJECT_URL = "https://your-project-id.supabase.co"; 
+const String SUPABASE_ANON_KEY    = "YOUR-ANON-KEY";
+
+WebServer server(80);
+
+// ==================== Keypad ====================
+const byte ROWS = 4, COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1','2','3','A'}, {'4','5','6','B'},
+  {'7','8','9','C'}, {'*','0','#','D'}
+};
+byte rowPins[ROWS] = {25, 26, 21, 22};
+byte colPins[COLS] = {4, 27, 17, 5};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// ==================== الموظفين ====================
+const int MAX_EMP = 10;
+struct Employee {
+  String name;
+  String code;
+  bool   isIn;
+  time_t checkInTime;
+  bool   active;
+};
+
+Employee employees[MAX_EMP] = {
+  {"يوسف",  "5555", false, 0, true},
+  {"مصطفى", "6666", false, 0, true},
+  {"محمود", "7777", false, 0, true},
+};
+int NUM_EMP = 3;
+
+// ==================== HTML Dashboard ====================
+String getHTML() {
+  String html = R"rawliteral(
+  <!DOCTYPE html>
+  <html lang="ar" dir="rtl" data-theme="dark">
+  <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>نظام الحضور والانصراف</title>
+  <style>
+  :root { --bg: #f8fafc; --surface: #ffffff; --text: #0f172a; --text-muted: #475569; --border: #e2e8f0; --primary: #3b82f6; --success: #22c55e; --danger: #ef4444; --warning: #f59e0b; --header-bg: #ffffff; --card-hover: #f1f5f9; }
+  [data-theme="dark"] { --bg: #0f172a; --surface: #1e293b; --text: #f1f5f9; --text-muted: #94a3b8; --border: #334155; --header-bg: #1e293b; --card-hover: #334155; }
+  * { margin:0; padding:0; box-sizing:border-box; transition: background 0.3s, color 0.3s, border-color 0.3s; }
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 18px; }
+  .header { background: var(--header-bg); padding: 20px 30px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+  .header h1 { font-size: 1.8rem; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .header-actions { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 10px; background: var(--surface); padding: 5px; border-radius: 12px; border: 1px solid var(--border); flex-wrap: wrap; }
+  .tab { padding: 12px 24px; border-radius: 10px; cursor: pointer; background: transparent; border: none; color: var(--text-muted); font-size: 1.1rem; font-weight: 600; transition: all 0.3s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { background: var(--primary); color: #fff; box-shadow: 0 2px 4px rgba(59, 130, 246, 0.4); }
+  .theme-toggle { background: var(--surface); border: 2px solid var(--border); color: var(--text); width: 45px; height: 45px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .theme-toggle:hover { background: var(--border); }
+  .panel { display: none; padding: 30px; max-width: 1200px; margin: 0 auto; animation: fadeIn 0.4s ease-out; }
+  .panel.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.2); } }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
+  .stat { background: var(--surface); border-radius: 16px; padding: 25px; text-align: center; border: 1px solid var(--border); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+  .stat .n { font-size: 3rem; font-weight: 800; margin-bottom: 5px; }
+  .stat .l { color: var(--text-muted); font-size: 1.1rem; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 25px; }
+  .card { background: var(--surface); border-radius: 16px; padding: 25px; border-right: 8px solid var(--border); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); transition: transform 0.3s, box-shadow 0.3s; position: relative; overflow: hidden; }
+  .card:hover { transform: translateY(-5px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); background: var(--card-hover); }
+  .card.in { border-right-color: var(--success); }
+  .card.out { border-right-color: var(--danger); }
+  .card .cn { font-size: 1.6rem; font-weight: 800; margin-bottom: 15px; color: var(--text); }
+  .badge { display: inline-block; padding: 6px 16px; border-radius: 20px; font-size: 1rem; font-weight: 600; }
+  .card.in .badge { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+  .card.out .badge { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+  .dur { color: var(--text-muted); font-size: 1.1rem; margin-top: 15px; display: flex; align-items: center; gap: 5px; font-weight: 500; }
+  .log-table { width: 100%; border-collapse: collapse; font-size: 1.1rem; }
+  .log-table th { background: var(--surface); padding: 18px; text-align: right; color: var(--text-muted); border-bottom: 2px solid var(--border); font-weight: 700; }
+  .log-table td { padding: 16px 18px; border-bottom: 1px solid var(--border); color: var(--text); }
+  .log-table tr:hover { background: var(--card-hover); }
+  .admin-wrap { max-width: 600px; margin: 0 auto; }
+  .card-box { background: var(--surface); border-radius: 16px; padding: 30px; margin-bottom: 25px; border: 1px solid var(--border); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+  .card-box h3 { margin-bottom: 20px; color: var(--text); font-size: 1.4rem; display: flex; align-items: center; gap: 8px; }
+  .inp { width: 100%; padding: 14px 18px; background: var(--bg); border: 2px solid var(--border); border-radius: 12px; color: var(--text); font-size: 1.1rem; margin-bottom: 15px; outline: none; transition: border-color 0.3s; }
+  .inp:focus { border-color: var(--primary); }
+  .btn { padding: 12px 24px; border-radius: 12px; border: none; cursor: pointer; font-size: 1.1rem; font-weight: 700; width: 100%; transition: opacity 0.3s, transform 0.1s; }
+  .btn:active { transform: scale(0.98); }
+  .btn-blue { background: var(--primary); color: #fff; }
+  .btn-green { background: var(--success); color: #fff; }
+  .btn-red { background: var(--danger); color: #fff; width: auto; padding: 8px 16px; font-size: 1rem; }
+  .msg { padding: 12px; border-radius: 12px; margin-top: 15px; text-align: center; font-size: 1.1rem; font-weight: 600; animation: fadeIn 0.3s; }
+  .ok { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+  .err { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+  .emp-row { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: var(--bg); border-radius: 12px; margin-bottom: 10px; border: 1px solid var(--border); transition: background 0.3s; }
+  .emp-row:hover { background: var(--border); }
+  .live-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--success); display: inline-block; animation: pulse 2s infinite; box-shadow: 0 0 8px var(--success); }
+  
+  /* Payroll specific */
+  .pay-val { font-size: 1.2rem; font-weight: 800; }
+  .pay-pos { color: var(--success); }
+  .pay-neg { color: var(--danger); }
+  </style>
+  </head>
+  <body>
+  <div class="header">
+    <h1>🏢 نظام الحضور <span class="live-dot" title="النظام متصل"></span></h1>
+    <div class="header-actions">
+      <div class="tabs">
+        <button class="tab active" onclick="showTab('dash',this)">📊 الحضور</button>
+        <button class="tab" onclick="showTab('log',this)">📋 السجل</button>
+        <button class="tab" onclick="showTab('payroll',this)">💰 الرواتب</button>
+        <button class="tab" onclick="showTab('admin',this)">⚙️ الإدارة</button>
+      </div>
+      <button class="theme-toggle" onclick="toggleTheme()" title="تبديل المظهر">🌓</button>
+    </div>
+  </div>
+
+  <div id="tab-dash" class="panel active">
+    <div class="stats">
+      <div class="stat"><div class="n" id="c-in" style="color:var(--success)">0</div><div class="l">داخل الآن</div></div>
+      <div class="stat"><div class="n" id="c-out" style="color:var(--danger)">0</div><div class="l">بالخارج</div></div>
+      <div class="stat"><div class="n" id="c-tot" style="color:var(--primary)">0</div><div class="l">إجمالي الموظفين</div></div>
+    </div>
+    <div class="grid" id="emp-grid"></div>
+    <p style="text-align:center; color:var(--text-muted); margin-top:25px; font-size:1rem; font-weight:600" id="upd"></p>
+  </div>
+
+  <div id="tab-log" class="panel">
+    <div class="card-box" style="max-width:100%">
+      <h3>📋 سجل الحضور الكامل (PostgreSQL)</h3>
+      <div style="overflow-x:auto;">
+        <table class="log-table">
+          <thead><tr><th>الاسم</th><th>الإجراء</th><th>الوقت والتاريخ</th><th>المدة</th></tr></thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-payroll" class="panel">
+    <div class="card-box" style="max-width:100%">
+      <h3 id="pay-title">💰 تقرير رواتب الشهر الحالي</h3>
+      <div style="overflow-x:auto;">
+        <table class="log-table">
+          <thead><tr>
+            <th>الاسم</th>
+            <th>أيام الحضور</th>
+            <th>إجمالي الساعات</th>
+            <th>خصم التأخير</th>
+            <th>الراتب المستحق</th>
+          </tr></thead>
+          <tbody id="pay-body"></tbody>
+        </table>
+      </div>
+      <p style="text-align:center;color:var(--text-muted);margin-top:20px;font-size:0.9rem;">
+        * الحساب مبني على: اليومية 200$ | إجمالي أيام العمل 26 | خصم 50$ للتأخير أقل من ساعتين و 100$ لأكثر من ذلك.
+      </p>
+    </div>
+  </div>
+
+  <div id="tab-admin" class="panel">
+    <div class="admin-wrap">
+      <div id="lock-panel" class="card-box">
+        <h3>🔐 دخول الإدارة</h3>
+        <input class="inp" type="password" id="apass" placeholder="كلمة المرور">
+        <button class="btn btn-blue" onclick="doLogin()">تسجيل الدخول</button>
+        <div id="lmsg"></div>
+      </div>
+      <div id="admin-panel" style="display:none">
+        <div class="card-box">
+          <h3>➕ إضافة موظف جديد</h3>
+          <input class="inp" type="text"   id="nname" placeholder="اسم الموظف">
+          <input class="inp" type="number" id="ncode" placeholder="كود سري (4 أرقام)" maxlength="4">
+          <button class="btn btn-green" onclick="doAdd()">إضافة الموظف</button>
+          <div id="amsg"></div>
+        </div>
+        <div class="card-box">
+          <h3>👥 الموظفون الحاليون</h3>
+          <div id="admin-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  let ap = '';
+  const SUPABASE_URL = ')rawliteral" + SUPABASE_PROJECT_URL + R"rawliteral(';
+  const SUPABASE_ANON_KEY = ')rawliteral" + SUPABASE_ANON_KEY + R"rawliteral(';
+
+  function toggleTheme() {
+    const html = document.documentElement;
+    const newTheme = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', newTheme);
+    localStorage.setItem('theme', newTheme);
+  }
+  if(localStorage.getItem('theme') === 'light') document.documentElement.setAttribute('data-theme', 'light');
+
+  function showTab(t, btn) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + t).classList.add('active');
+    btn.classList.add('active');
+    
+    if (t === 'log') fetchLog();
+    if (t === 'payroll') fetchPayroll();
+  }
+
+  function liveDur(ts) {
+    if (!ts) return '';
+    const d = Math.floor((Date.now() / 1000) - ts);
+    if (d < 0) return '00:00';
+    return String(Math.floor(d / 3600)).padStart(2,'0') + ':' + String(Math.floor((d % 3600) / 60)).padStart(2,'0');
+  }
+
+  async function fetchStatus() {
+    try {
+      const r = await fetch('/api/status');
+      const data = await r.json();
+      let inC = 0, outC = 0;
+      document.getElementById('emp-grid').innerHTML = data.map(e => {
+        e.isIn ? inC++ : outC++;
+        return `<div class="card ${e.isIn ? 'in' : 'out'}">
+          <div class="cn">${e.name}</div>
+          <span class="badge">${e.isIn ? '✅ متواجد' : '❌ غائب'}</span>
+          ${e.isIn ? `<div class="dur">⏱ التواجد: <strong style="margin-right:5px">${liveDur(e.checkInTime)}</strong></div>` : ''}
+        </div>`;
+      }).join('');
+      document.getElementById('c-in').textContent  = inC;
+      document.getElementById('c-out').textContent = outC;
+      document.getElementById('c-tot').textContent = data.length;
+      document.getElementById('upd').textContent   = 'آخر تحديث: ' + new Date().toLocaleTimeString('ar-EG');
+    } catch(e) {}
+  }
+
+  async function fetchLog() {
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/attendance_logs?select=*&order=created_at.desc&limit=100`, {
+        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+      });
+      const data = await r.json();
+      document.getElementById('log-body').innerHTML = data.length ? data.map(l => {
+        let d = new Date(l.created_at);
+        return `<tr>
+          <td><strong>${l.name || l.employee_name || '-'}</strong></td>
+          <td><span style="color: ${l.action === 'Check-in' ? 'var(--success)' : 'var(--danger)'}; font-weight:bold;">${l.action === 'Check-in' ? '🟢 دخول' : '🔴 خروج'}</span></td>
+          <td>${d.toLocaleTimeString('ar-EG')}<br><span style="font-size:0.8rem;color:var(--text-muted)">${d.toLocaleDateString('ar-EG')}</span></td>
+          <td><strong style="color:var(--text-muted)">${l.duration || '-'}</strong></td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="4" style="text-align:center;padding:30px">لا يوجد سجلات</td></tr>';
+    } catch(e) {}
+  }
+
+  // ================= حساب الرواتب =================
+  async function fetchPayroll() {
+    try {
+      document.getElementById('pay-body').innerHTML = '<tr><td colspan="5" style="text-align:center;">جاري الحساب... ⏳</td></tr>';
+      
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/attendance_logs?select=*&order=created_at.asc&limit=2000`, {
+        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+      });
+      const data = await r.json();
+
+      let stats = {};
+      let currentMonth = new Date().getMonth(); 
+      let monthNames = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+      
+      document.getElementById('pay-title').innerHTML = `💰 تقرير رواتب شهر ${monthNames[currentMonth]}`;
+
+      data.forEach(l => {
+        let dateObj = new Date(l.created_at);
+        if(dateObj.getMonth() !== currentMonth) return; 
+
+        let name = l.name || l.employee_name;
+        if(!name) return;
+
+        if(!stats[name]) {
+          stats[name] = { attendedDates: new Set(), totalMinutes: 0, penalty: 0 };
+        }
+
+        let dateStr = dateObj.toLocaleDateString('en-US');
+
+        if(l.action === 'Check-in') {
+          if(!stats[name].attendedDates.has(dateStr)) {
+            stats[name].attendedDates.add(dateStr);
+            
+            let h = dateObj.getHours();
+            let m = dateObj.getMinutes();
+            let lateMinutes = 0;
+            
+            if(h >= 8) {
+              lateMinutes = ((h - 8) * 60) + m; 
+            }
+
+            if(lateMinutes > 0 && lateMinutes < 120) {
+              stats[name].penalty += 50; 
+            } else if (lateMinutes >= 120) {
+              stats[name].penalty += 100;
+            }
+          }
+        } 
+        else if (l.action === 'Check-out' && l.duration) {
+          let parts = l.duration.split(':');
+          if(parts.length === 2) {
+            stats[name].totalMinutes += (parseInt(parts[0]) * 60) + parseInt(parts[1]);
+          }
+        }
+      });
+
+      let html = '';
+      for(let emp in stats) {
+        let s = stats[emp];
+        let days = s.attendedDates.size;
+        let hrs = Math.floor(s.totalMinutes / 60);
+        let mins = s.totalMinutes % 60;
+        
+        let baseSalary = days * 200;
+        let netSalary = baseSalary - s.penalty; 
+
+        html += `<tr>
+          <td><strong>${emp}</strong></td>
+          <td><span class="badge" style="background:rgba(59,130,246,0.1);color:var(--primary)">${days} / 26</span></td>
+          <td><strong>${hrs}</strong> <span style="font-size:0.8rem;color:var(--text-muted)">ساعة و</span> <strong>${mins}</strong> <span style="font-size:0.8rem;color:var(--text-muted)">دقيقة</span></td>
+          <td class="pay-val pay-neg">-$${s.penalty}</td>
+          <td class="pay-val pay-pos">$${netSalary}</td>
+        </tr>`;
+      }
+
+      if(html === '') html = '<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text-muted)">لم يتم تسجيل أي حضور هذا الشهر حتى الآن</td></tr>';
+      document.getElementById('pay-body').innerHTML = html;
+
+    } catch(e) {
+      console.error(e);
+      document.getElementById('pay-body').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--danger)">حدث خطأ أثناء الاتصال بقاعدة البيانات</td></tr>';
+    }
+  }
+  // ===============================================
+
+  async function doLogin() {
+    ap = document.getElementById('apass').value;
+    const r = await fetch('/api/admin/verify?pass=' + encodeURIComponent(ap));
+    const d = await r.json();
+    if (d.ok) { document.getElementById('lock-panel').style.display = 'none'; document.getElementById('admin-panel').style.display = 'block'; loadAdminList(); }
+    else showMsg('lmsg', 'كلمة مرور خاطئة ❌', false);
+  }
+
+  async function loadAdminList() {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    document.getElementById('admin-list').innerHTML = data.map(e =>
+      `<div class="emp-row">
+        <div><b>${e.name}</b> <span style="color:var(--text-muted); font-size:.9rem; margin-right:10px;">| الكود: ${e.code}</span></div>
+        <button class="btn btn-red" onclick="doRemove('${e.code}')">إزالة</button>
+      </div>`
+    ).join('');
+  }
+
+  async function doAdd() {
+    const name = document.getElementById('nname').value.trim();
+    const code = document.getElementById('ncode').value.trim();
+    if (!name || code.length !== 4) { showMsg('amsg','الاسم والكود مطلوبين',false); return; }
+    const r = await fetch(`/api/admin/add?pass=${encodeURIComponent(ap)}&name=${encodeURIComponent(name)}&code=${code}`);
+    const d = await r.json();
+    showMsg('amsg', d.msg, d.ok);
+    if (d.ok) { document.getElementById('nname').value = ''; document.getElementById('ncode').value = ''; loadAdminList(); fetchStatus(); }
+  }
+
+  async function doRemove(code) {
+    if (!confirm('متأكد من المسح؟')) return;
+    const r = await fetch(`/api/admin/remove?pass=${encodeURIComponent(ap)}&code=${code}`);
+    const d = await r.json();
+    showMsg('amsg', d.msg, d.ok);
+    if (d.ok) { loadAdminList(); fetchStatus(); }
+  }
+
+  function showMsg(id, msg, ok) {
+    const el = document.getElementById(id);
+    el.innerHTML = `<div class="msg ${ok ? 'ok' : 'err'}">${msg}</div>`;
+    setTimeout(() => el.innerHTML = '', 4000);
+  }
+
+  fetchStatus();
+  setInterval(fetchStatus, 5000);
+  </script>
+  </body>
+  </html>
+  )rawliteral";
+  return html;
+}
+
+// ==================== متغيرات ====================
+String enteredCode = "";
+const int CODE_LENGTH = 4;
+
+String statusJSON() {
+  String j = "["; bool first = true;
+  for (int i = 0; i < MAX_EMP; i++) {
+    if (!employees[i].active) continue;
+    if (!first) j += ",";
+    j += "{\"name\":\"" + employees[i].name + "\",\"code\":\"" + employees[i].code + "\",\"isIn\":" + (employees[i].isIn ? "true" : "false") + ",\"checkInTime\":" + String((long)employees[i].checkInTime) + "}";
+    first = false;
+  }
+  return j + "]";
+}
+
+void setupRoutes() {
+  server.on("/", HTTP_GET, []() { server.send(200, "text/html; charset=utf-8", getHTML()); });
+  server.on("/api/status", HTTP_GET, []() { server.sendHeader("Access-Control-Allow-Origin", "*"); server.send(200, "application/json", statusJSON()); });
+  server.on("/api/admin/verify", HTTP_GET, []() { server.send(200, "application/json", (server.arg("pass") == ADMIN_PASS) ? "{\"ok\":true}" : "{\"ok\":false}"); });
+  server.on("/api/admin/add", HTTP_GET, []() {
+    if (server.arg("pass") != ADMIN_PASS) { server.send(403, "application/json", "{\"ok\":false}"); return; }
+    String name = server.arg("name"); String code = server.arg("code");
+    for (int i = 0; i < MAX_EMP; i++) {
+      if (!employees[i].active) { employees[i] = {name, code, false, 0, true}; NUM_EMP++; server.send(200, "application/json", "{\"ok\":true,\"msg\":\"تمت الإضافة ✅\"}"); return; }
+    }
+  });
+  server.on("/api/admin/remove", HTTP_GET, []() {
+    if (server.arg("pass") != ADMIN_PASS) { server.send(403, "application/json", "{\"ok\":false}"); return; }
+    String code = server.arg("code");
+    for (int i = 0; i < MAX_EMP; i++) {
+      if (employees[i].active && employees[i].code == code) { employees[i].active = false; NUM_EMP--; server.send(200, "application/json", "{\"ok\":true,\"msg\":\"تم الحذف ✅\"}"); return; }
+    }
+  });
+  server.begin(); Serial.println("✓ Web Server شغال!");
+}
+
+String calcDuration(time_t in, time_t out) {
+  long d = max(0L, (long)(out - in)); char buf[10];
+  sprintf(buf, "%02d:%02d", (int)(d / 3600), (int)((d % 3600) / 60)); return String(buf);
+}
+
+// ==================== دوال الإضاءة (LED) ====================
+void successBlink() {
+  for (int i = 0; i < 3; i++) { digitalWrite(LED_PIN, HIGH); delay(100); digitalWrite(LED_PIN, LOW); delay(100); }
+}
+
+void failBlink() {
+  digitalWrite(LED_PIN, HIGH); delay(1000); digitalWrite(LED_PIN, LOW);
+}
+
+// ==================== الإرسال لـ N8N و Supabase ====================
+void sendToN8N(String name, String code, String action, String dur) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http; http.begin(webhook_url); http.addHeader("Content-Type", "application/json");
+  int res = http.POST("{\"name\":\"" + name + "\",\"code\":\"" + code + "\",\"action\":\"" + action + "\",\"duration\":\"" + dur + "\"}");
+  Serial.printf(res > 0 ? "✓ n8n OK (%d)\n" : "✗ n8n Error: %d\n", res); http.end();
+}
+
+void sendToSupabase(String name, String code, String action, String dur) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client; client.setInsecure(); HTTPClient http;
+  http.begin(client, SUPABASE_PROJECT_URL + "/rest/v1/attendance_logs");
+  http.addHeader("Content-Type", "application/json"); http.addHeader("apikey", SUPABASE_ANON_KEY);
+  http.addHeader("Authorization", "Bearer " + SUPABASE_ANON_KEY); http.addHeader("Prefer", "return=minimal");
+  int res = http.POST("{\"name\":\"" + name + "\",\"code\":\"" + code + "\",\"action\":\"" + action + "\",\"duration\":\"" + dur + "\"}");
+  Serial.printf(res > 0 ? "✓ Supabase DB OK (%d)\n" : "✗ Supabase DB Error: %d\n", res); http.end();
+}
+
+// ==================== التحقق من الكود ====================
+void checkCode(String code) {
+  for (int i = 0; i < MAX_EMP; i++) {
+    if (!employees[i].active || employees[i].code != code) continue;
+    
+    employees[i].isIn = !employees[i].isIn;
+    String action = employees[i].isIn ? "Check-in" : "Check-out";
+    time_t now; time(&now); String dur = "";
+    
+    if (employees[i].isIn) { 
+      employees[i].checkInTime = now; 
+      Serial.printf("✓ %s - دخول\n", employees[i].name.c_str()); 
+    } else { 
+      dur = calcDuration(employees[i].checkInTime, now); 
+      Serial.printf("✓ %s - خروج | %s\n", employees[i].name.c_str(), dur.c_str()); 
+    }
+    
+    sendToN8N(employees[i].name, employees[i].code, action, dur);
+    sendToSupabase(employees[i].name, employees[i].code, action, dur);
+    
+    successBlink(); // وميض النجاح
+    
+    Serial.println("-------------------------\nأدخل الكود:"); return;
+  }
+  Serial.println("✗ كود خاطئ!");
+  failBlink(); // وميض الفشل
+}
+
+// ==================== Setup ====================
+void setup() {
+  Serial.begin(115200); delay(1000);
+  
+  pinMode(LED_PIN, OUTPUT); // تفعيل اللمبة المدمجة
+  
+  WiFi.begin(ssid, password); Serial.print("جاري الاتصال");
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\n✓ WiFi متصل!"); Serial.print("🌐 افتح المتصفح على: http://"); Serial.println(WiFi.localIP());
+  
+  configTime(2 * 3600, 0, "pool.ntp.org");
+  time_t now = 0; while (now < 100000) { delay(500); time(&now); }
+  Serial.println("✓ الوقت متزامن!"); 
+  
+  setupRoutes(); 
+  Serial.println("✅ النظام جاهز - أدخل الكود:");
+}
+
+// ==================== Loop ====================
+void loop() {
+  server.handleClient();
+  
+  char key = keypad.getKey(); if (!key) return;
+  if (key == '*') { enteredCode = ""; Serial.println("\n[مسح]"); return; }
+  if (key == 'A' || key == 'B' || key == 'C' || key == 'D' || key == '#') return;
+  
+  enteredCode += key; Serial.print("*");
+  if ((int)enteredCode.length() == CODE_LENGTH) { 
+    Serial.println(); 
+    checkCode(enteredCode); 
+    enteredCode = ""; 
+  }
+}
