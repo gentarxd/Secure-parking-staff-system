@@ -9,7 +9,7 @@
 //  Main Gate Servo (SG90)
 #define SERVO_PIN 8
 
-//  Emergency Servo (MG995)
+//  Emergency Gate Servo (MG995)
 #define EMERGENCY_SERVO_PIN 7
 
 // LEDs
